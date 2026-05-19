@@ -1,85 +1,126 @@
-import { Injectable } from '@nestjs/common';
-import { PrismaService } from '../../prisma/prisma.service';
-
-type SearchType = 'partnumber' | 'vehicle' | 'text';
+import { Injectable, Logger } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import OpenAI from 'openai';
 
 @Injectable()
 export class SearchService {
-  constructor(private prisma: PrismaService) {}
+  private readonly logger = new Logger(SearchService.name);
+  private openai: OpenAI;
 
-  async search(q: string, type: SearchType = 'text', page = 1, limit = 20) {
-    const skip = (page - 1) * limit;
+  constructor(private config: ConfigService) {
+    this.openai = new OpenAI({ apiKey: this.config.get('OPENAI_API_KEY') });
+  }
 
-    if (type === 'partnumber') {
-      return this.searchByPartNumber(q, skip, limit);
+  async search(q: string, type: string = 'text') {
+    const prompt = this.buildPrompt(q, type);
+
+    try {
+      const response = await this.openai.responses.create({
+        model: 'gpt-4o-mini',
+        tools: [{ type: 'web_search_preview' }],
+        input: prompt,
+      });
+
+      const text = response.output_text;
+      return this.parseResponse(text, q);
+    } catch (err) {
+      this.logger.error('OpenAI search failed', err);
+      throw err;
     }
-    return this.searchByText(q, skip, limit);
   }
 
-  private async searchByPartNumber(q: string, skip: number, take: number) {
-    const normalized = q.trim().toUpperCase();
-    const [data, total] = await this.prisma.$transaction([
-      this.prisma.part.findMany({
-        where: {
-          OR: [
-            { partNumber: { equals: normalized, mode: 'insensitive' } },
-            { oemCode: { equals: normalized, mode: 'insensitive' } },
-            { altCodes: { has: normalized } },
-          ],
-          status: 'ACTIVE',
-        },
-        include: {
-          manufacturer: true,
-          category: true,
-          media: { where: { isPrimary: true }, take: 1 },
-        },
-        skip,
-        take,
-      }),
-      this.prisma.part.count({
-        where: {
-          OR: [
-            { partNumber: { equals: normalized, mode: 'insensitive' } },
-            { oemCode: { equals: normalized, mode: 'insensitive' } },
-            { altCodes: { has: normalized } },
-          ],
-          status: 'ACTIVE',
-        },
-      }),
-    ]);
-    return { data, total, page: Math.floor(skip / take) + 1, limit: take };
+  private buildPrompt(q: string, type: string): string {
+    if (type === 'partnumber') {
+      return `Pesquise informações técnicas completas sobre a peça automotiva com part number ou código: "${q}".
+
+Busque em sites especializados como fabricantes (Bosch, Delphi, NGK, Mahle, etc.), distribuidores e catálogos automotivos.
+
+Retorne um JSON com esta estrutura exata:
+{
+  "encontrado": true ou false,
+  "partNumber": "código da peça",
+  "codigoOEM": "código OEM se houver",
+  "codigosAlternativos": ["outros códigos"],
+  "fabricante": "nome do fabricante",
+  "descricao": "descrição completa da peça",
+  "categoria": "categoria (ex: Motor, Freios, Suspensão)",
+  "especificacoesTecnicas": {
+    "chave": "valor"
+  },
+  "veiculosCompativeis": [
+    {
+      "marca": "ex: Volkswagen",
+      "modelo": "ex: Golf",
+      "anoInicio": 2015,
+      "anoFim": 2020,
+      "motor": "ex: 1.4 TSI"
+    }
+  ],
+  "equivalentes": [
+    { "fabricante": "nome", "codigo": "código" }
+  ],
+  "observacoes": "informações adicionais relevantes",
+  "fontes": ["urls consultadas"]
+}
+
+Responda APENAS com o JSON, sem texto adicional.`;
+    }
+
+    return `Pesquise peças automotivas relacionadas a: "${q}".
+
+Busque em catálogos, fabricantes e distribuidores automotivos brasileiros e internacionais.
+
+Retorne um JSON com esta estrutura:
+{
+  "resultados": [
+    {
+      "partNumber": "código",
+      "fabricante": "nome",
+      "descricao": "descrição",
+      "categoria": "categoria",
+      "veiculosCompativeis": ["lista resumida de veículos"],
+      "relevancia": "por que essa peça é relevante para a busca"
+    }
+  ],
+  "totalEncontrado": número,
+  "sugestoes": ["termos relacionados para refinar a busca"]
+}
+
+Responda APENAS com o JSON, sem texto adicional.`;
   }
 
-  private async searchByText(q: string, skip: number, take: number) {
-    const [data, total] = await this.prisma.$transaction([
-      this.prisma.part.findMany({
-        where: {
-          OR: [
-            { description: { contains: q, mode: 'insensitive' } },
-            { technicalDesc: { contains: q, mode: 'insensitive' } },
-            { partNumber: { contains: q, mode: 'insensitive' } },
-          ],
-          status: 'ACTIVE',
-        },
-        include: {
-          manufacturer: true,
-          category: true,
-          media: { where: { isPrimary: true }, take: 1 },
-        },
-        skip,
-        take,
-      }),
-      this.prisma.part.count({
-        where: {
-          OR: [
-            { description: { contains: q, mode: 'insensitive' } },
-            { technicalDesc: { contains: q, mode: 'insensitive' } },
-            { partNumber: { contains: q, mode: 'insensitive' } },
-          ],
-          status: 'ACTIVE',
-        },
-      }),
-    ]);
-    return { data, total, page: Math.floor(skip / take) + 1, limit: take };
+  private parseResponse(text: string, query: string) {
+    try {
+      const jsonMatch = text.match(/\{[\s\S]*\}/);
+      if (!jsonMatch) throw new Error('No JSON in response');
+
+      const data = JSON.parse(jsonMatch[0]);
+
+      if (data.resultados) {
+        return {
+          query,
+          type: 'text',
+          total: data.totalEncontrado || data.resultados.length,
+          results: data.resultados,
+          sugestoes: data.sugestoes || [],
+        };
+      }
+
+      return {
+        query,
+        type: 'partnumber',
+        encontrado: data.encontrado,
+        part: data.encontrado ? data : null,
+        mensagem: data.encontrado ? null : 'Peça não encontrada nas fontes consultadas.',
+      };
+    } catch {
+      return {
+        query,
+        type: 'raw',
+        encontrado: false,
+        rawResponse: text,
+        mensagem: 'Não foi possível estruturar a resposta.',
+      };
+    }
   }
 }
