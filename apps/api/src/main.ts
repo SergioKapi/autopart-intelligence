@@ -6,21 +6,8 @@ import { AppModule } from './app.module';
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
 
-  const allowedOrigins = [
-    'https://kapi.com.br',
-    'http://kapi.com.br',
-    'http://localhost:3000',
-    process.env.FRONTEND_URL,
-  ].filter(Boolean);
-
   app.enableCors({
-    origin: (origin, callback) => {
-      if (!origin || allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error(`CORS blocked: ${origin}`));
-      }
-    },
+    origin: true,
     credentials: true,
   });
 
