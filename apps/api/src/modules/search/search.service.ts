@@ -27,15 +27,14 @@ export class SearchService {
         return { query: q, type: 'partnumber', encontrado: false, mensagem: techData.mensagem || 'Não encontrado.' };
       }
 
-      // Step 3: only now search shopping/images with accurate query
+      // Step 3: search shopping with accurate query, then filter strictly
       const shoppingQuery = `${techData.fabricante || ''} ${techData.descricao || q} ${q}`.trim();
-      const [shopping, images] = await Promise.all([
-        this.serperShopping(shoppingQuery, q),
-        this.serperSearch(q, type, 'images'),
-      ]);
+      const shopping = await this.serperShopping(shoppingQuery, q, techData.fabricante || '', techData.descricao || '');
 
-      const prices = this.extractPrices(shopping, q, techData.descricao);
-      const photo = this.extractPhoto(images, shopping);
+      // Step 4: image — prefer shopping image of a confirmed match, skip organic images
+      const photo = this.extractPhoto(shopping, q);
+
+      const prices = this.extractPrices(shopping);
 
       return {
         query: q,
@@ -46,20 +45,21 @@ export class SearchService {
       };
     }
 
-    const images = await this.serperSearch(q, type, 'images');
     return {
       query: q,
       type: 'text',
       total: techData.totalEncontrado || techData.resultados?.length || 0,
-      results: (techData.resultados || []).map((r: any, i: number) => ({
-        ...r,
-        foto: images[i]?.imageUrl || null,
-      })),
+      results: (techData.resultados || []),
       sugestoes: techData.sugestoes || [],
     };
   }
 
-  private async serperShopping(shoppingQuery: string, partNumber: string): Promise<any[]> {
+  private async serperShopping(
+    shoppingQuery: string,
+    partNumber: string,
+    fabricante: string,
+    descricao: string,
+  ): Promise<any[]> {
     const apiKey = this.config.get('SERPER_API_KEY');
     try {
       const res = await fetch('https://google.serper.dev/shopping', {
@@ -70,14 +70,35 @@ export class SearchService {
       const data: any = await res.json();
       const results = data.shopping || [];
 
-      // Filter: keep only results that mention the part number OR have a reasonable price (> R$5)
-      const pn = partNumber.toLowerCase();
+      const pn = partNumber.toLowerCase().trim();
+      const fab = fabricante.toLowerCase().trim();
+
+      // Key words from description (4+ chars, ignore common words)
+      const stopWords = new Set(['para', 'peça', 'auto', 'carro', 'veículo', 'original', 'novo']);
+      const descWords = descricao
+        .toLowerCase()
+        .split(/[\s,\-\/]+/)
+        .filter((w) => w.length >= 4 && !stopWords.has(w));
+
       return results.filter((r: any) => {
         const title = (r.title || '').toLowerCase();
-        const price = parseFloat((r.price || '0').replace(/[^0-9,]/g, '').replace(',', '.'));
-        const mentionsPart = title.includes(pn);
-        const reasonablePrice = price > 5;
-        return reasonablePrice && (mentionsPart || price > 20);
+        const price = parseFloat((r.price || '0').replace(/[^0-9,]/g, '').replace(',', '.')) || 0;
+
+        // Minimum price sanity check
+        if (price < 10) return false;
+
+        // Priority 1: title explicitly mentions the part number
+        if (pn.length >= 4 && title.includes(pn)) return true;
+
+        // Priority 2: title mentions the manufacturer AND at least 2 desc keywords
+        const mentionsFab = fab.length >= 3 && title.includes(fab);
+        const descMatchCount = descWords.filter((w) => title.includes(w)).length;
+        if (mentionsFab && descMatchCount >= 2) return true;
+
+        // Priority 3: title matches at least 3 distinct description keywords (no fab required)
+        if (descMatchCount >= 3) return true;
+
+        return false;
       });
     } catch {
       return [];
@@ -86,13 +107,10 @@ export class SearchService {
 
   private async serperSearch(q: string, type: string, endpoint: string): Promise<any[]> {
     const apiKey = this.config.get('SERPER_API_KEY');
-    const query = type === 'partnumber'
-      ? endpoint === 'shopping'
-        ? `${q} peça automotiva comprar`
-        : endpoint === 'images'
-        ? `${q} peça automotiva`
-        : `${q} part number peça automotiva especificações`
-      : `${q} peça automotiva`;
+    const query =
+      type === 'partnumber'
+        ? `${q} part number peça automotiva especificações técnicas`
+        : `${q} peça automotiva`;
 
     try {
       const res = await fetch(`https://google.serper.dev/${endpoint}`, {
@@ -115,42 +133,47 @@ export class SearchService {
       .map((r, i) => `[${i + 1}] ${r.title}\n${r.snippet || ''}\nURL: ${r.link}`)
       .join('\n\n');
 
-    const prompt = type === 'partnumber'
-      ? `Analise os resultados de busca sobre o código "${q}" e extraia dados técnicos SOMENTE das fontes abaixo. NÃO invente nada.
+    const prompt =
+      type === 'partnumber'
+        ? `Analise os resultados de busca sobre o código "${q}" e extraia dados técnicos SOMENTE se as fontes confirmam explicitamente que "${q}" é uma peça automotiva.
+
+REGRAS ESTRITAS:
+- NUNCA invente dados. Se um campo não aparece nas fontes, use null ou [].
+- O campo "encontrado" só deve ser true se as fontes confirmam inequivocamente que "${q}" é um código de peça automotiva.
+- "descricao" deve ser exata — não generalizar (ex: não use "rolamento" se é "rolamento de roda dianteiro direito").
+- "veiculosCompativeis" só inclua veículos explicitamente mencionados nas fontes.
 
 FONTES:
 ${context}
 
-Retorne JSON:
+Retorne APENAS este JSON (sem texto extra):
 {
-  "encontrado": true/false,
+  "encontrado": true,
   "partNumber": "${q}",
-  "codigoOEM": "se nas fontes",
+  "codigoOEM": null,
   "codigosAlternativos": [],
-  "fabricante": "fabricante",
-  "descricao": "descrição completa",
-  "categoria": "categoria",
-  "especificacoesTecnicas": { "chave": "valor" },
+  "fabricante": "nome do fabricante",
+  "descricao": "descrição completa e específica da peça",
+  "categoria": "categoria da peça",
+  "especificacoesTecnicas": {},
   "veiculosCompativeis": [{ "marca": "", "modelo": "", "anoInicio": null, "anoFim": null, "motor": "" }],
   "equivalentes": [{ "fabricante": "", "codigo": "" }],
-  "observacoes": "observações técnicas",
-  "fontes": ["urls"]
+  "observacoes": null,
+  "fontes": []
 }
 
-Se não confirmar que é peça automotiva: {"encontrado": false, "mensagem": "Não identificado como peça automotiva"}
-Responda APENAS com JSON.`
-      : `Com base nas fontes abaixo sobre "${q}", liste peças encontradas. NÃO invente.
+Se NÃO confirmar que "${q}" é peça automotiva: {"encontrado": false, "mensagem": "Código não identificado como peça automotiva"}`
+        : `Com base nas fontes abaixo, liste APENAS peças automotivas relacionadas a "${q}". Não invente.
 
 FONTES:
 ${context}
 
-JSON:
+Retorne APENAS este JSON:
 {
   "resultados": [{ "partNumber": "", "fabricante": "", "descricao": "", "categoria": "", "veiculosCompativeis": [], "relevancia": "" }],
   "totalEncontrado": 0,
   "sugestoes": []
-}
-Responda APENAS com JSON.`;
+}`;
 
     const message = await this.claude.messages.create({
       model: 'claude-sonnet-4-5',
@@ -167,8 +190,9 @@ Responda APENAS com JSON.`;
     }
   }
 
-  private extractPrices(shopping: any[], partNumber = '', descricao = ''): any {
+  private extractPrices(shopping: any[]): any {
     if (!shopping.length) return null;
+
     const prices = shopping
       .filter((s) => s.price)
       .map((s) => ({
@@ -177,13 +201,15 @@ Responda APENAS com JSON.`;
         precoNumerico: parseFloat(s.price?.replace(/[^0-9,]/g, '').replace(',', '.')) || 0,
         loja: s.source,
         link: s.link,
-        imagem: s.imageUrl || s.thumbnailUrl || null,
+        imagem: this.cleanImageUrl(s.imageUrl || s.thumbnailUrl || null),
         avaliacao: s.rating || null,
         avaliacoes: s.ratingCount || null,
       }))
+      .filter((s) => s.precoNumerico > 0)
       .sort((a, b) => a.precoNumerico - b.precoNumerico);
 
     if (!prices.length) return null;
+
     return {
       maisBarato: prices[0],
       maisCaros: prices.slice(1, 4),
@@ -193,20 +219,42 @@ Responda APENAS com JSON.`;
     };
   }
 
-  private extractPhoto(images: any[], shopping: any[]): string | null {
-    const shopPhoto = shopping.find((s) => s.imageUrl)?.imageUrl;
-    const photo = shopPhoto || images[0]?.imageUrl || images[0]?.thumbnailUrl || null;
-    return this.cleanImageUrl(photo);
+  /**
+   * Extract photo strictly from shopping results.
+   * Prefer items whose title contains the part number.
+   * Never use organic image search (too unreliable).
+   */
+  private extractPhoto(shopping: any[], partNumber: string): string | null {
+    const pn = partNumber.toLowerCase();
+
+    // First: shopping item that explicitly names the part number
+    const exactMatch = shopping.find(
+      (s) => s.imageUrl && (s.title || '').toLowerCase().includes(pn),
+    );
+    if (exactMatch?.imageUrl) return this.cleanImageUrl(exactMatch.imageUrl);
+
+    // Second: thumbnailUrl from exact match
+    const exactThumb = shopping.find(
+      (s) => s.thumbnailUrl && (s.title || '').toLowerCase().includes(pn),
+    );
+    if (exactThumb?.thumbnailUrl) return this.cleanImageUrl(exactThumb.thumbnailUrl);
+
+    // Third: any shopping image (at least it passed the product filter)
+    const anyImage = shopping.find((s) => s.imageUrl || s.thumbnailUrl);
+    if (anyImage) return this.cleanImageUrl(anyImage.imageUrl || anyImage.thumbnailUrl);
+
+    return null;
   }
 
   private cleanImageUrl(url: string | null): string | null {
     if (!url) return null;
-    // Serper returns Google redirect URLs — extract the actual image URL
     try {
+      // gstatic / encrypted-tbn are direct CDN URLs — keep them
       if (url.includes('encrypted-tbn') || url.includes('gstatic.com')) return url;
+      // Extract actual URL from Google redirect
       const match = url.match(/imgurl=([^&]+)/);
       if (match) return decodeURIComponent(match[1]);
-      // If URL is too long (Google redirect), skip it
+      // Drop overly long redirect URLs
       if (url.length > 300) return null;
       return url;
     } catch {
