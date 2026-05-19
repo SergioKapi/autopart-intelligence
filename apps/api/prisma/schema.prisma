@@ -1,0 +1,278 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+enum UserRole {
+  ADMIN
+  TECHNICIAN
+  WORKSHOP
+  CONSUMER
+}
+
+enum PartStatus {
+  ACTIVE
+  INACTIVE
+  DISCONTINUED
+}
+
+enum PartType {
+  ORIGINAL
+  OEM
+  AFTERMARKET
+  REMANUFACTURED
+}
+
+enum MediaType {
+  IMAGE
+  PDF_MANUAL
+  PDF_TECHNICAL
+  VIDEO
+  DIAGRAM
+}
+
+enum CompatibilityPosition {
+  FRONT
+  REAR
+  LEFT
+  RIGHT
+  FRONT_LEFT
+  FRONT_RIGHT
+  REAR_LEFT
+  REAR_RIGHT
+  UNIVERSAL
+}
+
+enum SubscriptionStatus {
+  ACTIVE
+  CANCELLED
+  EXPIRED
+  TRIAL
+}
+
+model User {
+  id            String         @id @default(cuid())
+  email         String         @unique
+  password      String
+  name          String
+  role          UserRole       @default(CONSUMER)
+  emailVerified Boolean        @default(false)
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+  subscription  Subscription?
+  auditLogs     AuditLog[]
+
+  @@map("users")
+}
+
+model Plan {
+  id            String         @id @default(cuid())
+  name          String         @unique
+  slug          String         @unique
+  price         Decimal        @db.Decimal(10, 2)
+  features      Json
+  isActive      Boolean        @default(true)
+  subscriptions Subscription[]
+
+  @@map("plans")
+}
+
+model Subscription {
+  id        String             @id @default(cuid())
+  userId    String             @unique
+  planId    String
+  status    SubscriptionStatus @default(TRIAL)
+  expiresAt DateTime?
+  createdAt DateTime           @default(now())
+  updatedAt DateTime           @updatedAt
+  user      User               @relation(fields: [userId], references: [id])
+  plan      Plan               @relation(fields: [planId], references: [id])
+
+  @@map("subscriptions")
+}
+
+model Manufacturer {
+  id        String   @id @default(cuid())
+  name      String
+  slug      String   @unique
+  country   String?
+  logoUrl   String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  parts     Part[]
+
+  @@map("manufacturers")
+}
+
+model VehicleBrand {
+  id        String         @id @default(cuid())
+  name      String
+  slug      String         @unique
+  country   String?
+  logoUrl   String?
+  isActive  Boolean        @default(true)
+  models    VehicleModel[]
+
+  @@map("vehicle_brands")
+}
+
+model VehicleModel {
+  id        String           @id @default(cuid())
+  brandId   String
+  name      String
+  slug      String
+  isActive  Boolean          @default(true)
+  brand     VehicleBrand     @relation(fields: [brandId], references: [id])
+  versions  VehicleVersion[]
+
+  @@unique([brandId, slug])
+  @@map("vehicle_models")
+}
+
+model VehicleVersion {
+  id              String                  @id @default(cuid())
+  modelId         String
+  name            String
+  engine          String
+  displacement    Float?
+  fuelType        String?
+  transmission    String?
+  yearStart       Int
+  yearEnd         Int?
+  isActive        Boolean                 @default(true)
+  model           VehicleModel            @relation(fields: [modelId], references: [id])
+  compatibilities VehicleCompatibility[]
+
+  @@map("vehicle_versions")
+}
+
+model Category {
+  id           String        @id @default(cuid())
+  name         String
+  slug         String        @unique
+  parentId     String?
+  parent       Category?     @relation("CategoryTree", fields: [parentId], references: [id])
+  children     Category[]    @relation("CategoryTree")
+  parts        Part[]
+
+  @@map("categories")
+}
+
+model Part {
+  id              String                 @id @default(cuid())
+  partNumber      String
+  oemCode         String?
+  altCodes        String[]               @default([])
+  manufacturerId  String
+  categoryId      String?
+  description     String
+  technicalDesc   String?
+  specs           Json?
+  partType        PartType               @default(OEM)
+  status          PartStatus             @default(ACTIVE)
+  weight          Float?
+  dimensions      Json?
+  createdAt       DateTime               @default(now())
+  updatedAt       DateTime               @updatedAt
+  manufacturer    Manufacturer           @relation(fields: [manufacturerId], references: [id])
+  category        Category?              @relation(fields: [categoryId], references: [id])
+  media           PartMedia[]
+  compatibilities VehicleCompatibility[]
+  equivalencesA   PartEquivalence[]      @relation("PartEquivA")
+  equivalencesB   PartEquivalence[]      @relation("PartEquivB")
+  substitutesFrom PartSubstitute[]       @relation("SubstituteFrom")
+  substitutesTo   PartSubstitute[]       @relation("SubstituteTo")
+  complementsA    PartComplement[]       @relation("ComplementA")
+  complementsB    PartComplement[]       @relation("ComplementB")
+
+  @@unique([partNumber, manufacturerId])
+  @@index([partNumber])
+  @@index([oemCode])
+  @@map("parts")
+}
+
+model PartMedia {
+  id        String    @id @default(cuid())
+  partId    String
+  type      MediaType
+  url       String
+  filename  String
+  isPrimary Boolean   @default(false)
+  createdAt DateTime  @default(now())
+  part      Part      @relation(fields: [partId], references: [id], onDelete: Cascade)
+
+  @@map("part_media")
+}
+
+model VehicleCompatibility {
+  id        String                @id @default(cuid())
+  partId    String
+  versionId String
+  position  CompatibilityPosition @default(UNIVERSAL)
+  notes     String?
+  part      Part                  @relation(fields: [partId], references: [id], onDelete: Cascade)
+  version   VehicleVersion        @relation(fields: [versionId], references: [id])
+
+  @@unique([partId, versionId, position])
+  @@map("vehicle_compatibilities")
+}
+
+model PartEquivalence {
+  id        String   @id @default(cuid())
+  partAId   String
+  partBId   String
+  verified  Boolean  @default(false)
+  notes     String?
+  createdAt DateTime @default(now())
+  partA     Part     @relation("PartEquivA", fields: [partAId], references: [id])
+  partB     Part     @relation("PartEquivB", fields: [partBId], references: [id])
+
+  @@unique([partAId, partBId])
+  @@map("part_equivalences")
+}
+
+model PartSubstitute {
+  id          String   @id @default(cuid())
+  fromPartId  String
+  toPartId    String
+  notes       String?
+  createdAt   DateTime @default(now())
+  fromPart    Part     @relation("SubstituteFrom", fields: [fromPartId], references: [id])
+  toPart      Part     @relation("SubstituteTo", fields: [toPartId], references: [id])
+
+  @@unique([fromPartId, toPartId])
+  @@map("part_substitutes")
+}
+
+model PartComplement {
+  id        String   @id @default(cuid())
+  partAId   String
+  partBId   String
+  notes     String?
+  createdAt DateTime @default(now())
+  partA     Part     @relation("ComplementA", fields: [partAId], references: [id])
+  partB     Part     @relation("ComplementB", fields: [partBId], references: [id])
+
+  @@unique([partAId, partBId])
+  @@map("part_complements")
+}
+
+model AuditLog {
+  id         String   @id @default(cuid())
+  userId     String?
+  entity     String
+  entityId   String
+  action     String
+  before     Json?
+  after      Json?
+  ipAddress  String?
+  createdAt  DateTime @default(now())
+  user       User?    @relation(fields: [userId], references: [id])
+
+  @@index([entity, entityId])
+  @@map("audit_logs")
+}
