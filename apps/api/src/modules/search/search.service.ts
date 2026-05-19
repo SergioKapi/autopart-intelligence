@@ -12,40 +12,76 @@ export class SearchService {
   }
 
   async search(q: string, type: string = 'text') {
-    const [organic, shopping, images] = await Promise.all([
-      this.serperSearch(q, type, 'search'),
-      this.serperSearch(q, type, 'shopping'),
-      this.serperSearch(q, type, 'images'),
-    ]);
+    // Step 1: organic search for technical data
+    const organic = await this.serperSearch(q, type, 'search');
 
-    if (!organic.length && !shopping.length) {
-      return { query: q, type, encontrado: false, mensagem: 'Part number não encontrado em nenhuma fonte.' };
+    if (!organic.length) {
+      return { query: q, type, encontrado: false, mensagem: 'Nenhuma fonte encontrada para este código.' };
     }
 
+    // Step 2: Claude identifies the part from organic results
     const techData = await this.extractWithClaude(q, type, organic);
 
     if (type === 'partnumber') {
-      const prices = this.extractPrices(shopping);
+      if (!techData.encontrado) {
+        return { query: q, type: 'partnumber', encontrado: false, mensagem: techData.mensagem || 'Não encontrado.' };
+      }
+
+      // Step 3: only now search shopping/images with accurate query
+      const shoppingQuery = `${techData.fabricante || ''} ${techData.descricao || q} ${q}`.trim();
+      const [shopping, images] = await Promise.all([
+        this.serperShopping(shoppingQuery, q),
+        this.serperSearch(q, type, 'images'),
+      ]);
+
+      const prices = this.extractPrices(shopping, q, techData.descricao);
       const photo = this.extractPhoto(images, shopping);
+
       return {
         query: q,
         type: 'partnumber',
-        encontrado: techData.encontrado ?? false,
-        part: techData.encontrado ? { ...techData, precos: prices, foto: photo } : null,
-        mensagem: techData.encontrado ? null : (techData.mensagem || 'Não encontrado.'),
+        encontrado: true,
+        part: { ...techData, precos: prices, foto: photo },
+        mensagem: null,
       };
     }
 
+    const images = await this.serperSearch(q, type, 'images');
     return {
       query: q,
       type: 'text',
       total: techData.totalEncontrado || techData.resultados?.length || 0,
       results: (techData.resultados || []).map((r: any, i: number) => ({
         ...r,
-        foto: images[i]?.imageUrl || images[i]?.thumbnailUrl || null,
+        foto: images[i]?.imageUrl || null,
       })),
       sugestoes: techData.sugestoes || [],
     };
+  }
+
+  private async serperShopping(shoppingQuery: string, partNumber: string): Promise<any[]> {
+    const apiKey = this.config.get('SERPER_API_KEY');
+    try {
+      const res = await fetch('https://google.serper.dev/shopping', {
+        method: 'POST',
+        headers: { 'X-API-KEY': apiKey, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ q: shoppingQuery, gl: 'br', hl: 'pt', num: 10 }),
+      });
+      const data: any = await res.json();
+      const results = data.shopping || [];
+
+      // Filter: keep only results that mention the part number OR have a reasonable price (> R$5)
+      const pn = partNumber.toLowerCase();
+      return results.filter((r: any) => {
+        const title = (r.title || '').toLowerCase();
+        const price = parseFloat((r.price || '0').replace(/[^0-9,]/g, '').replace(',', '.'));
+        const mentionsPart = title.includes(pn);
+        const reasonablePrice = price > 5;
+        return reasonablePrice && (mentionsPart || price > 20);
+      });
+    } catch {
+      return [];
+    }
   }
 
   private async serperSearch(q: string, type: string, endpoint: string): Promise<any[]> {
@@ -131,7 +167,7 @@ Responda APENAS com JSON.`;
     }
   }
 
-  private extractPrices(shopping: any[]): any {
+  private extractPrices(shopping: any[], partNumber = '', descricao = ''): any {
     if (!shopping.length) return null;
     const prices = shopping
       .filter((s) => s.price)
