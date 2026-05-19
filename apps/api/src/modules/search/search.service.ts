@@ -159,7 +159,22 @@ Responda APENAS com JSON.`;
 
   private extractPhoto(images: any[], shopping: any[]): string | null {
     const shopPhoto = shopping.find((s) => s.imageUrl)?.imageUrl;
-    if (shopPhoto) return shopPhoto;
-    return images[0]?.imageUrl || images[0]?.thumbnailUrl || null;
+    const photo = shopPhoto || images[0]?.imageUrl || images[0]?.thumbnailUrl || null;
+    return this.cleanImageUrl(photo);
+  }
+
+  private cleanImageUrl(url: string | null): string | null {
+    if (!url) return null;
+    // Serper returns Google redirect URLs — extract the actual image URL
+    try {
+      if (url.includes('encrypted-tbn') || url.includes('gstatic.com')) return url;
+      const match = url.match(/imgurl=([^&]+)/);
+      if (match) return decodeURIComponent(match[1]);
+      // If URL is too long (Google redirect), skip it
+      if (url.length > 300) return null;
+      return url;
+    } catch {
+      return null;
+    }
   }
 }
