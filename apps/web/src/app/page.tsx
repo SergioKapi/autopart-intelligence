@@ -12,9 +12,9 @@ export default function HomePage() {
           <span className="font-bold text-lg text-white">AutoPart Intelligence</span>
         </div>
         <nav className="flex items-center gap-4">
-          <a href="/busca" className="text-gray-400 hover:text-white text-sm transition-colors">Busca</a>
-          <a href="/auth/login" className="text-gray-400 hover:text-white text-sm transition-colors">Entrar</a>
-          <a href="/auth/register" className="btn-primary text-sm">Cadastrar</a>
+          <a href="/autoparts/busca" className="text-gray-400 hover:text-white text-sm transition-colors">Busca</a>
+          <a href="/autoparts/auth/login" className="text-gray-400 hover:text-white text-sm transition-colors">Entrar</a>
+          <a href="/autoparts/auth/register" className="btn-primary text-sm">Cadastrar</a>
         </nav>
       </header>
 

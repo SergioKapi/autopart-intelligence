@@ -23,7 +23,7 @@ export default function SearchPage() {
   return (
     <main className="min-h-screen">
       <header className="border-b border-gray-800 px-6 py-4 flex items-center justify-between">
-        <a href="/" className="flex items-center gap-2">
+        <a href="/autoparts/" className="flex items-center gap-2">
           <div className="w-8 h-8 bg-brand-600 rounded-lg flex items-center justify-center">
             <span className="text-white font-bold text-sm">AP</span>
           </div>

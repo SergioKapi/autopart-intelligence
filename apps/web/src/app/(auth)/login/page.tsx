@@ -77,7 +77,7 @@ export default function LoginPage() {
 
         <p className="text-center text-gray-500 text-sm">
           Não tem conta?{' '}
-          <a href="/auth/register" className="text-brand-400 hover:underline">Cadastre-se</a>
+          <a href="/autoparts/auth/register" className="text-brand-400 hover:underline">Cadastre-se</a>
         </p>
       </div>
     </main>
