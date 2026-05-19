@@ -12,38 +12,47 @@ export class SearchService {
   }
 
   async search(q: string, type: string = 'text') {
-    const prompt = this.buildPrompt(q, type);
+    const systemPrompt = `Você é um especialista em peças automotivas com amplo conhecimento de catálogos técnicos mundiais e brasileiros.
+Quando perguntado sobre uma peça, forneça informações técnicas precisas baseadas no seu conhecimento.
+Responda SEMPRE com JSON válido, sem markdown, sem texto adicional fora do JSON.`;
+
+    const userPrompt = type === 'partnumber'
+      ? this.buildPartNumberPrompt(q)
+      : this.buildTextPrompt(q);
 
     try {
-      const response = await this.openai.responses.create({
-        model: 'gpt-4o-mini',
-        tools: [{ type: 'web_search_preview' }],
-        input: prompt,
+      const completion = await this.openai.chat.completions.create({
+        model: 'gpt-4o',
+        messages: [
+          { role: 'system', content: systemPrompt },
+          { role: 'user', content: userPrompt },
+        ],
+        response_format: { type: 'json_object' },
+        temperature: 0.2,
       });
 
-      const text = response.output_text;
-      return this.parseResponse(text, q);
-    } catch (err) {
-      this.logger.error('OpenAI search failed', err);
-      throw err;
+      const text = completion.choices[0].message.content || '{}';
+      this.logger.debug(`OpenAI response: ${text.substring(0, 200)}`);
+
+      return this.parseResponse(text, q, type);
+    } catch (err: any) {
+      this.logger.error('OpenAI search failed', err?.message);
+      throw new Error('Falha ao consultar IA: ' + err?.message);
     }
   }
 
-  private buildPrompt(q: string, type: string): string {
-    if (type === 'partnumber') {
-      return `Pesquise informações técnicas completas sobre a peça automotiva com part number ou código: "${q}".
+  private buildPartNumberPrompt(q: string): string {
+    return `Busque informações técnicas sobre a peça automotiva com código: "${q}"
 
-Busque em sites especializados como fabricantes (Bosch, Delphi, NGK, Mahle, etc.), distribuidores e catálogos automotivos.
-
-Retorne um JSON com esta estrutura exata:
+Retorne um JSON com esta estrutura:
 {
-  "encontrado": true ou false,
-  "partNumber": "código da peça",
+  "encontrado": true,
+  "partNumber": "${q}",
   "codigoOEM": "código OEM se houver",
-  "codigosAlternativos": ["outros códigos"],
+  "codigosAlternativos": ["outros códigos conhecidos"],
   "fabricante": "nome do fabricante",
   "descricao": "descrição completa da peça",
-  "categoria": "categoria (ex: Motor, Freios, Suspensão)",
+  "categoria": "categoria (ex: Motor, Freios, Suspensão, Elétrica)",
   "especificacoesTecnicas": {
     "chave": "valor"
   },
@@ -57,69 +66,66 @@ Retorne um JSON com esta estrutura exata:
     }
   ],
   "equivalentes": [
-    { "fabricante": "nome", "codigo": "código" }
+    { "fabricante": "nome", "codigo": "código equivalente" }
   ],
-  "observacoes": "informações adicionais relevantes",
-  "fontes": ["urls consultadas"]
+  "observacoes": "informações adicionais relevantes para mecânicos",
+  "fontes": ["bases de dados ou catálogos de referência"]
 }
 
-Responda APENAS com o JSON, sem texto adicional.`;
-    }
+Se não reconhecer o código, retorne: { "encontrado": false, "mensagem": "Código não encontrado nas bases conhecidas" }`;
+  }
 
-    return `Pesquise peças automotivas relacionadas a: "${q}".
-
-Busque em catálogos, fabricantes e distribuidores automotivos brasileiros e internacionais.
+  private buildTextPrompt(q: string): string {
+    return `Liste peças automotivas relacionadas à busca: "${q}"
 
 Retorne um JSON com esta estrutura:
 {
   "resultados": [
     {
-      "partNumber": "código",
-      "fabricante": "nome",
-      "descricao": "descrição",
+      "partNumber": "código da peça",
+      "fabricante": "nome do fabricante",
+      "descricao": "descrição completa",
       "categoria": "categoria",
-      "veiculosCompativeis": ["lista resumida de veículos"],
-      "relevancia": "por que essa peça é relevante para a busca"
+      "veiculosCompativeis": ["VW Golf 1.4 TSI 2015-2020", "..."],
+      "relevancia": "por que essa peça atende à busca"
     }
   ],
-  "totalEncontrado": número,
+  "totalEncontrado": 3,
   "sugestoes": ["termos relacionados para refinar a busca"]
 }
 
-Responda APENAS com o JSON, sem texto adicional.`;
+Retorne até 5 peças mais relevantes.`;
   }
 
-  private parseResponse(text: string, query: string) {
+  private parseResponse(text: string, query: string, type: string) {
     try {
-      const jsonMatch = text.match(/\{[\s\S]*\}/);
-      if (!jsonMatch) throw new Error('No JSON in response');
+      const data = JSON.parse(text);
 
-      const data = JSON.parse(jsonMatch[0]);
-
-      if (data.resultados) {
+      if (type === 'partnumber') {
         return {
           query,
-          type: 'text',
-          total: data.totalEncontrado || data.resultados.length,
-          results: data.resultados,
-          sugestoes: data.sugestoes || [],
+          type: 'partnumber',
+          encontrado: data.encontrado ?? false,
+          part: data.encontrado ? data : null,
+          mensagem: data.encontrado ? null : (data.mensagem || 'Peça não encontrada.'),
         };
       }
 
       return {
         query,
-        type: 'partnumber',
-        encontrado: data.encontrado,
-        part: data.encontrado ? data : null,
-        mensagem: data.encontrado ? null : 'Peça não encontrada nas fontes consultadas.',
+        type: 'text',
+        total: data.totalEncontrado || data.resultados?.length || 0,
+        results: data.resultados || [],
+        sugestoes: data.sugestoes || [],
       };
-    } catch {
+    } catch (err) {
+      this.logger.error('Failed to parse OpenAI response', text);
       return {
         query,
         type: 'raw',
         encontrado: false,
         rawResponse: text,
-        mensagem: 'Não foi possível estruturar a resposta.',
+        mensagem: 'Erro ao processar resposta da IA.',
       };
     }
   }
